@@ -306,10 +306,14 @@ static void drawEnvPage() {
   u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
   u8g2_DrawUTF8(u, tx + 10, cardY + 20, "温度");
   char tStr[24];
-  if (shtOk) snprintf(tStr, sizeof(tStr), "%.1f°C", temp);
-  else       snprintf(tStr, sizeof(tStr), "--.-°C");
+  if (shtOk) snprintf(tStr, sizeof(tStr), "%.1f", temp);
+  else       snprintf(tStr, sizeof(tStr), "--.-");
   u8g2_SetFont(u, u8g2_font_inb24_mn);
+  int tnw = u8g2_GetStrWidth(u, tStr);
   u8g2_DrawStr(u, tx + 10, cardY + 62, tStr);
+  // 单位 "°C" 用中文字体 (inb24 不含度数符号)
+  u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+  u8g2_DrawUTF8(u, tx + 10 + tnw + 4, cardY + 62, "°C");
 
   // 湿度卡片
   int hx = tx + cardW + gapX;
@@ -393,11 +397,10 @@ static void updateEnvTimePartial() {
   int tw = u8g2_GetStrWidth(u, timeStr);
   u8g2_DrawStr(u, (BMP_W - tw) / 2, 88, timeStr);
 
-  // 用 u8g2 的 tile 行机制发送时间区域 (tile 6~11)
-  // 设置当前 tile 行为 6, sendBuffer 会发送从 6 到末尾的所有行
-  u8g2_SetBufferCurrTileRow(u, ENV_TIME_TILE_START);
+  // ST7305 是反射式 LCD (非 E-ink), 可快速全屏刷新
+  // 直接 sendBuffer 全屏发送, 避免局部 tile 刷新在旋转模式下的偏移问题
+  u8g2_SetBufferCurrTileRow(u, 0);
   u8g2.sendBuffer();
-  u8g2_SetBufferCurrTileRow(u, 0);  // 重置, 避免下次全屏刷新从错误位置开始
 }
 
 static void showBitmap() {
