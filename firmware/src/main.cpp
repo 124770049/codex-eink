@@ -441,32 +441,41 @@ static void splash(const char *line) {
 
 static bool wifiConnect() {
   if (wifiOk && WiFi.status() == WL_CONNECTED) return true;
-  LOG("wifi: connecting to %s", WIFI_SSID);
-  splash("connecting wifi...");
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - t0 > 15000) {
-      LOG("wifi: TIMEOUT rssi=%d", WiFi.RSSI());
-      WiFi.disconnect(true, true);
-      WiFi.mode(WIFI_OFF);
-      wifiOk = false;
-      return false;
+  // 逐个尝试 WiFi 列表中的网络 (家/公司等), 连上哪个用哪个
+  for (int i = 0; i < (int)WIFI_COUNT; i++) {
+    LOG("wifi: trying %s (%d/%d)", WIFI_LIST[i][0], i + 1, (int)WIFI_COUNT);
+    splash("connecting wifi...");
+    WiFi.begin(WIFI_LIST[i][0], WIFI_LIST[i][1]);
+
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+      if (millis() - t0 > 8000) break;  // 每个网络尝试 8s
+      delay(50);
     }
-    delay(50);
-  }
-  wifiOk = true;
-  LOG("wifi: connected, ip=%s rssi=%d", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiOk = true;
+      LOG("wifi: connected to %s, ip=%s rssi=%d",
+          WIFI_LIST[i][0], WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  // 首次连接成功后, 用 NTP 校准 RTC
-  static bool ntpSynced = false;
-  if (!ntpSynced) {
-    ntpSynced = syncNtpToRtc();
+      // 首次连接成功后, 用 NTP 校准 RTC
+      static bool ntpSynced = false;
+      if (!ntpSynced) {
+        ntpSynced = syncNtpToRtc();
+      }
+      return true;
+    }
+    LOG("wifi: %s failed, try next", WIFI_LIST[i][0]);
+    WiFi.disconnect(true, true);
   }
-  return true;
+
+  LOG("wifi: all networks failed");
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  wifiOk = false;
+  return false;
 }
 
 // NTP 同步时间并写入 RTC (WiFi 已连接时调用)
