@@ -29,6 +29,7 @@
 #define MAC_PORT       8090
 #define REFRESH_MS     (5UL * 60UL * 1000UL)  // 自动刷新间隔(与 Mac 端 5 分钟抓取同步)
 #define HW_REFRESH_MS  (15UL * 1000UL)         // 硬件页刷新间隔(墨水屏建议 ≥10s)
+#define AUTO_SWITCH_MS (30UL * 1000UL)         // 自动轮播切换间隔(保护按键寿命)
 
 #define ROTATION       U8G2_R1          // R1: 300x400 竖屏 -> 400x300 横屏
 #define INVERT         0                // 实测 RAM 1=黑 0=白: 不取反即为白底黑字(Mac 位图 1=黑)
@@ -65,6 +66,8 @@ static U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(ROTATION, RLCD_CS, RLCD_DC, RLCD_RST
 static uint8_t bmpBuf[BMP_BYTES];
 static int curPage = 0;
 static bool wifiOk = false;
+static uint32_t lastRefresh = 0;   // 全屏刷新计时
+static uint32_t lastSwitch = 0;    // 自动轮播计时
 
 // 前向声明
 static bool wifiConnect();
@@ -592,39 +595,53 @@ void setup() {
   LOG("display init done");
 
   refreshPage(curPage);
+  lastRefresh = millis();
+  lastSwitch = millis();
 }
 
 void loop() {
-  // KEY 键: 按下松开后切换页面并立即拉取
+  static uint32_t lastTimeTick = 0;    // 环境页时间局部刷新计时
+
+  // KEY 键: 手动切换页面 (保留作为备用, 平时靠自动轮播)
   if (digitalRead(KEY_BTN) == LOW) {
     while (digitalRead(KEY_BTN) == LOW) delay(20);
     curPage = (curPage + 1) % PAGE_COUNT;
     LOG("key: switch to page %d (%s)", curPage, PAGE_NAMES[curPage]);
     refreshPage(curPage);
+    lastSwitch = millis();   // 手动切换后重置自动轮播计时
+    lastRefresh = millis();  // 同时重置全屏刷新计时
   }
-  // BOOT 键: 按下松开后立即刷新当前页
+  // BOOT 键: 立即刷新当前页
   if (digitalRead(BOOT_BTN) == LOW) {
     while (digitalRead(BOOT_BTN) == LOW) delay(20);
     LOG("boot key: refresh page %d", curPage);
     refreshPage(curPage);
+    lastRefresh = millis();
     return;
   }
 
+  // 自动轮播: 每隔 AUTO_SWITCH_MS 切换到下一页 (保护按键寿命)
+  if (millis() - lastSwitch >= AUTO_SWITCH_MS) {
+    lastSwitch = millis();
+    curPage = (curPage + 1) % PAGE_COUNT;
+    LOG("auto: switch to page %d (%s)", curPage, PAGE_NAMES[curPage]);
+    refreshPage(curPage);
+    lastRefresh = millis();  // 切页即刷新, 重置刷新计时
+  }
+
   // 环境页: 每秒局部刷新时间数字 (快速, 不闪屏)
-  static uint32_t lastTimeTick = 0;
   if (curPage == PAGE_ENV && millis() - lastTimeTick >= 1000) {
     lastTimeTick = millis();
     updateEnvTimePartial();
   }
 
-  // 定时全屏刷新当前页 (环境页用 60s 全屏, 时间靠上面的局部刷新)
-  static uint32_t last = 0;
+  // 定时全屏刷新当前页 (仅在当前页停留超过间隔时刷新)
   uint32_t interval;
-  if (curPage == 2)            interval = HW_REFRESH_MS;
+  if (curPage == 2)             interval = HW_REFRESH_MS;
   else if (curPage == PAGE_ENV) interval = 60UL * 1000UL;  // 环境页 60s 全屏刷新
-  else                         interval = REFRESH_MS;
-  if (millis() - last >= interval) {
-    last = millis();
+  else                          interval = REFRESH_MS;
+  if (millis() - lastRefresh >= interval) {
+    lastRefresh = millis();
     refreshPage(curPage);
   }
   delay(50);
