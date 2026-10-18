@@ -21,6 +21,7 @@
 #include <U8g2lib.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 
 #include "secrets.h"
 
@@ -97,6 +98,20 @@ static float readBatteryVoltage() {
   }
   float mv = (float)sum / N;
   return mv * 3.0f / 1000.0f;  // 分压 1:3 -> 实际电压
+}
+
+// 峰值电压记录 (存 flash, 用于满充校准: 充满后读取 maxV 即可推算校准系数)
+static void trackMaxVoltage(float v) {
+  static uint32_t lastSave = 0;
+  Preferences p;
+  p.begin("batt", false);
+  float maxV = p.isKey("maxV") ? p.getFloat("maxV", 0.0f) : 0.0f;
+  if (v > maxV && millis() - lastSave > 60000) {  // 每分钟最多写一次, 保护 flash
+    p.putFloat("maxV", v);
+    lastSave = millis();
+    LOG("battery: new maxV %.2fV (saved)", v);
+  }
+  p.end();
 }
 
 // LiPo 电量百分比 (官方校准: 2.5V->0%, 4.2V->100%)
@@ -613,6 +628,12 @@ void setup() {
   lastRefresh = millis();
   lastSwitch = millis();
   lastCharging = isCharging(readBatteryVoltage());  // 初始化充电状态
+
+  // 报告历史峰值电压 (满充校准参考)
+  Preferences p;
+  p.begin("batt", true);
+  LOG("battery: historical maxV = %.2fV", p.isKey("maxV") ? p.getFloat("maxV", 0.0f) : 0.0f);
+  p.end();
 }
 
 void loop() {
@@ -650,6 +671,7 @@ void loop() {
   if (millis() - lastBattCheck >= 2000) {
     lastBattCheck = millis();
     float v = readBatteryVoltage();
+    trackMaxVoltage(v);  // 记录峰值电压 (满充校准用)
     bool charging = isCharging(v);
     if (charging != lastCharging) {
       lastCharging = charging;
