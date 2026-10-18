@@ -2,7 +2,7 @@
  * codex-eink ESP32 固件 · 微雪 ESP32-S3-RLCD-4.2 (ST7305, 300x400 全反射屏)
  *
  * 常驻模式(USB 供电): 启动 -> 连 WiFi (保持常连) -> 拉取当前页位图并绘制
- *   - KEY (GPIO18): 切换到下一页 (Codex / TRAE / HW) 并立即拉取
+ *   - KEY (GPIO18): 切换到下一页 (Codex / TRAE / HW / HOME_TEST) 并立即拉取
  *   - BOOT (GPIO0): 立即刷新当前页
  *   - 普通页每 5 分钟自动刷新, 硬件页每 15 秒刷新
  *
@@ -49,9 +49,9 @@
 #define ROW_BYTES (BMP_W / 8)          // 50
 
 // ---------- 页面定义 (与 Mac 端 codex_eink.py 页序一致) ----------
-const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW" };
-const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2" };
-#define PAGE_COUNT 3
+const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW", "HOME_TEST" };
+const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2", "/bitmap?page=3" };
+#define PAGE_COUNT 4
 
 static U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(ROTATION, RLCD_CS, RLCD_DC, RLCD_RST);
 static uint8_t bmpBuf[BMP_BYTES];

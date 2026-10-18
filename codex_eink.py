@@ -60,7 +60,7 @@ PROXY = "http://127.0.0.1:7890"  # launchd 服务不继承终端代理环境变�
 REFRESH_SECONDS = 300            # 默认 5 分钟刷一次
 HTTP_PORT = 8090
 WARN_THRESHOLD = 90              # 用量 >= 90% 显示告急角标
-PAGE_COUNT = 3
+PAGE_COUNT = 4
 HW_REFRESH_SECONDS = 10  # 硬件页刷新间隔(墨水屏建议 ≥10s)
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -611,6 +611,50 @@ def render_hardware(payload, fetched_at, error=None):
     return img
 
 
+def fetch_smart_home_test():
+    """占位测试页：先验证显示布局，不连接或控制真实设备。"""
+    return {
+        "air_conditioner": {
+            "name": "美的风管机",
+            "model": "KFR-51T2/BDN8-CF(3)Ⅲ",
+            "status": "待接入",
+        },
+        "feeder": {
+            "name": "霍曼喂食器",
+            "model": "PF20",
+            "status": "待接入",
+        },
+        "demo_only": True,
+    }
+
+
+def render_smart_home_test(payload, fetched_at, error=None):
+    """智能家居测试页的静态预览；接入前不发送任何设备命令。"""
+    img = Image.new("1", (WIDTH, HEIGHT), 1)
+    draw = ImageDraw.Draw(img)
+    fonts = Fonts()
+    draw_header(draw, fonts, "智能家居测试", "预览")
+
+    data = payload or {}
+    ac = data.get("air_conditioner", {})
+    feeder = data.get("feeder", {})
+
+    draw.rounded_rectangle([16, 52, 384, 135], radius=8, outline=0, width=2)
+    draw.text((28, 62), ac.get("name", "美的空调"), font=fonts.sec, fill=0)
+    draw.text((28, 87), ac.get("model", "型号待确认"), font=fonts.small, fill=0)
+    draw.text((28, 111), f"状态：{ac.get('status', '待接入')}", font=fonts.small, fill=0)
+
+    draw.rounded_rectangle([16, 145, 384, 228], radius=8, outline=0, width=2)
+    draw.text((28, 155), feeder.get("name", "霍曼喂食器"), font=fonts.sec, fill=0)
+    draw.text((28, 180), feeder.get("model", "PF20"), font=fonts.small, fill=0)
+    draw.text((28, 204), f"状态：{feeder.get('status', '待接入')}", font=fonts.small, fill=0)
+
+    notice = "布局预览 · 当前不会控制设备" if data.get("demo_only") else "设备状态"
+    draw.text((16, 242), notice, font=fonts.small, fill=0)
+    draw_footer(draw, fonts, fetched_at, error)
+    return img
+
+
 # ---------- 渲染基础 ----------
 class Fonts:
     def __init__(self):
@@ -688,6 +732,7 @@ class State:
             Page(0, "CODEX", fetch_codex, render_codex),
             Page(1, "TRAE", fetch_trae, render_trae),
             Page(2, "HW", fetch_hardware, render_hardware, interval=HW_REFRESH_SECONDS),
+            Page(3, "HOME_TEST", fetch_smart_home_test, render_smart_home_test),
         ]
 
     def get(self, idx):
