@@ -346,10 +346,10 @@ static void drawEnvPage() {
   int uw = u8g2_GetStrWidth(u, upStr);
   u8g2_DrawStr(u, BMP_W - uw - 12, by, upStr);
 
-  // 芯片温度 (右下)
+  // 芯片温度 (右下, 用英文避免 ASCII 字体中文乱码)
   float ct = temperatureRead();
   char ctStr[24];
-  snprintf(ctStr, sizeof(ctStr), "芯片 %.0f°C", ct);
+  snprintf(ctStr, sizeof(ctStr), "Chip %.0fC", ct);
   int cw = u8g2_GetStrWidth(u, ctStr);
   u8g2_DrawStr(u, BMP_W - cw - 12, by + 16, ctStr);
 
@@ -577,9 +577,9 @@ void loop() {
   // 定时刷新当前页 (硬件页/环境页用更短间隔)
   static uint32_t last = 0;
   uint32_t interval;
-  if (curPage == 2)       interval = HW_REFRESH_MS;
-  else if (curPage == PAGE_ENV) interval = 30UL * 1000UL;  // 环境页 30s
-  else                    interval = REFRESH_MS;
+  if (curPage == 2)            interval = HW_REFRESH_MS;
+  else if (curPage == PAGE_ENV) interval = 10UL * 1000UL;  // 环境页 10s 自动刷新
+  else                         interval = REFRESH_MS;
   if (millis() - last >= interval) {
     last = millis();
     refreshPage(curPage);
