@@ -1,0 +1,12 @@
+{
+  "name": "u8g2",
+  "version": "2.36.19",
+  "description": "Monochrome graphics library (vendored copy, fixed build config)",
+  "license": "BSD-3-Clause",
+  "build": {
+    "srcDir": ".",
+    "includeDir": "cppsrc",
+    "flags": ["-Icsrc"],
+    "srcFilter": ["+<csrc/*.c>", "+<cppsrc/*.cpp>"]
+  }
+}

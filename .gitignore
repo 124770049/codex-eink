@@ -1,0 +1,40 @@
+# 敏感信息（WiFi 凭证等）
+firmware/include/secrets.h
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# PlatformIO 构建产物
+firmware/.pio/
+*.bin
+*.elf
+*.map
+*.o
+*.a
+
+# 运行时日志与缓存
+server.log
+server.error.log
+history_*.json
+latest*.json
+preview*.png
+
+# u8g2 库中不需要提交的部分 (构建工具/平台示例/文档)
+firmware/lib/u8g2/tools/
+firmware/lib/u8g2/sys/
+firmware/lib/u8g2/doc/
+firmware/lib/u8g2/.github/
+firmware/lib/u8g2/.gitpod*
+firmware/lib/u8g2/.gitmodules
+firmware/lib/u8g2/pkg/
+firmware/lib/u8g2/CMakeLists.txt
+firmware/lib/u8g2/SConscript
+firmware/lib/u8g2/component.mk
+firmware/lib/u8g2/ChangeLog
+
+# 系统文件
+.DS_Store
+Thumbs.db
