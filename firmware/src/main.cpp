@@ -68,6 +68,7 @@ static int curPage = 0;
 static bool wifiOk = false;
 static uint32_t lastRefresh = 0;   // 全屏刷新计时
 static uint32_t lastSwitch = 0;    // 自动轮播计时
+static bool lastCharging = false;  // 上一次充电状态 (用于检测变化)
 
 // 前向声明
 static bool wifiConnect();
@@ -360,6 +361,7 @@ static void drawEnvPage() {
   drawBatteryIndicator(u);
 
   applyInvert();
+  u8g2_SetBufferCurrTileRow(u, 0);
   u8g2.sendBuffer();
 
   LOG("env: t=%.1fC h=%.0f%% rtc=%d chip=%.0fC", temp, hum, rt.valid, ct);
@@ -391,13 +393,11 @@ static void updateEnvTimePartial() {
   int tw = u8g2_GetStrWidth(u, timeStr);
   u8g2_DrawStr(u, (BMP_W - tw) / 2, 88, timeStr);
 
-  // 只发送时间区域的 tile 行到 ST7305
-  uint8_t w = u8x8->display_info->tile_width;
-  uint8_t *buf = u8g2_GetBufferPtr(u);
-  for (int row = ENV_TIME_TILE_START; row <= ENV_TIME_TILE_END; row++) {
-    uint8_t *ptr = buf + (uint32_t)row * w * 8;
-    u8x8_DrawTile(u8x8, 0, row, w, ptr);
-  }
+  // 用 u8g2 的 tile 行机制发送时间区域 (tile 6~11)
+  // 设置当前 tile 行为 6, sendBuffer 会发送从 6 到末尾的所有行
+  u8g2_SetBufferCurrTileRow(u, ENV_TIME_TILE_START);
+  u8g2.sendBuffer();
+  u8g2_SetBufferCurrTileRow(u, 0);  // 重置, 避免下次全屏刷新从错误位置开始
 }
 
 static void showBitmap() {
@@ -418,6 +418,7 @@ static void showBitmap() {
   // 叠加电池电量指示 (顶部居中)
   drawBatteryIndicator(u);
   applyInvert();
+  u8g2_SetBufferCurrTileRow(u, 0);
   u8g2.sendBuffer();
 }
 
@@ -431,6 +432,7 @@ static void splash(const char *line) {
   u8g2.drawStr(20, 110, line);
   drawBatteryIndicator(u8g2.getU8g2());
   applyInvert();
+  u8g2_SetBufferCurrTileRow(u8g2.getU8g2(), 0);
   u8g2.sendBuffer();
 }
 
@@ -569,6 +571,7 @@ static void refreshPage(int page) {
     u8g2.drawStr(20, 260, "KEY: next page   BOOT: retry");
     drawBatteryIndicator(u8g2.getU8g2());
     applyInvert();
+    u8g2_SetBufferCurrTileRow(u8g2.getU8g2(), 0);
     u8g2.sendBuffer();
     LOG("error screen: %s", err);
   }
@@ -597,10 +600,12 @@ void setup() {
   refreshPage(curPage);
   lastRefresh = millis();
   lastSwitch = millis();
+  lastCharging = isCharging(readBatteryVoltage());  // 初始化充电状态
 }
 
 void loop() {
-  static uint32_t lastTimeTick = 0;    // 环境页时间局部刷新计时
+  static uint32_t lastTimeTick = 0;     // 环境页时间局部刷新计时
+  static uint32_t lastBattCheck = 0;    // 电池/充电状态检测计时
 
   // KEY 键: 手动切换页面 (保留作为备用, 平时靠自动轮播)
   if (digitalRead(KEY_BTN) == LOW) {
@@ -627,6 +632,19 @@ void loop() {
     LOG("auto: switch to page %d (%s)", curPage, PAGE_NAMES[curPage]);
     refreshPage(curPage);
     lastRefresh = millis();  // 切页即刷新, 重置刷新计时
+  }
+
+  // 充电状态实时检测: 每 2 秒检查一次, 状态变化立即刷新页面
+  if (millis() - lastBattCheck >= 2000) {
+    lastBattCheck = millis();
+    float v = readBatteryVoltage();
+    bool charging = isCharging(v);
+    if (charging != lastCharging) {
+      lastCharging = charging;
+      LOG("charging state changed: %s (v=%.2f)", charging ? "ON" : "OFF", v);
+      refreshPage(curPage);   // 充电/断电状态变化 -> 立即刷新电池指示
+      lastRefresh = millis();
+    }
   }
 
   // 环境页: 每秒局部刷新时间数字 (快速, 不闪屏)
