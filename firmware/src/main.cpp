@@ -41,7 +41,7 @@
 #define RLCD_RST  41
 #define BOOT_BTN  0                    // BOOT 键: 立即刷新当前页
 #define KEY_BTN   18                   // KEY 键: 切换页面(低电平有效, 微雪文档)
-#define BATT_PIN  9                    // 电池电压检测 ADC1_CH8 (分压 3:4, Vbat=Vadc*4/3)
+#define BATT_PIN  4                    // 电池电压检测 (GPIO4, 分压 1:3, Vbat=Vadc*3) 微雪官方
 #define I2C_SDA   13                   // I2C 数据 (SHTC3 / PCF85063)
 #define I2C_SCL   14                   // I2C 时钟
 #define SHTC3_ADDR 0x70                // 温湿度传感器
@@ -81,11 +81,10 @@ static void applyInvert() {
 #endif
 }
 
-// 读取电池电压 (V), 分压比 3:4 (Vadc = Vbat * 3/4, 故 Vbat = Vadc * 4/3)
+// 读取电池电压 (V), 分压比 1:3 (Vadc = Vbat / 3, 故 Vbat = Vadc * 3) 微雪官方
 static float readBatteryVoltage() {
   analogReadResolution(12);
   analogSetPinAttenuation(BATT_PIN, ADC_11db);
-  // 多次采样取平均, 抑制噪声
   uint32_t sum = 0;
   const int N = 8;
   for (int i = 0; i < N; i++) {
@@ -93,19 +92,22 @@ static float readBatteryVoltage() {
     delay(2);
   }
   float mv = (float)sum / N;
-  return mv * 4.0f / 3.0f / 1000.0f;  // 分压 3:4 -> 实际电压
+  return mv * 3.0f / 1000.0f;  // 分压 1:3 -> 实际电压
 }
 
-// LiPo 电量百分比 (基于放电曲线分段线性)
+// LiPo 电量百分比 (官方校准: 2.5V->0%, 4.2V->100%)
 static int batteryPercent(float v) {
   if (v >= 4.20f) return 100;
-  if (v >= 4.10f) return 90 + (int)((v - 4.10f) / 0.10f * 10);
-  if (v >= 3.90f) return 75 + (int)((v - 3.90f) / 0.20f * 15);
-  if (v >= 3.70f) return 50 + (int)((v - 3.70f) / 0.20f * 25);
-  if (v >= 3.50f) return 25 + (int)((v - 3.50f) / 0.20f * 25);
-  if (v >= 3.30f) return 10 + (int)((v - 3.30f) / 0.20f * 15);
-  if (v >= 3.00f) return (int)((v - 3.00f) / 0.30f * 10);
-  return 0;
+  if (v <= 2.50f) return 0;
+  return (int)((v - 2.50f) / (4.20f - 2.50f) * 100.0f);
+}
+
+// 检测是否在充电: 优先用 USB 物理连接检测 (Serial.isPlugged 检测 VBUS),
+// 其次用电压辅助判断 (插墙充时电压被充电器拉到 ~4.2V)
+static bool isCharging(float vbat) {
+  if (Serial.isPlugged()) return true;   // USB 物理连接 -> 充电中
+  if (vbat >= 4.18f) return true;       // 电压被充电器顶高 -> 充电中
+  return false;
 }
 
 // 在 u8g2 缓冲区顶部中间绘制电池图标 + 百分比 + 充电状态
@@ -113,8 +115,7 @@ static int batteryPercent(float v) {
 static void drawBatteryIndicator(u8g2_t *u) {
   float v = readBatteryVoltage();
   int pct = batteryPercent(v);
-  // 充电判定: 电压 >= 4.16V 时充电芯片在恒压充电 (插 USB 时维持高位)
-  bool charging = (v >= 4.16f);
+  bool charging = isCharging(v);
 
   // 电池图标尺寸
   const int BW = 34;   // 电池主体宽
@@ -168,7 +169,7 @@ static void drawBatteryIndicator(u8g2_t *u) {
     u8g2_DrawUTF8(u, tx + tw + gap, y0 + BH - 1, chgStr);
   }
 
-  LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
+  LOG("battery: %.2fV %d%% %s (usb=%d)", v, pct, charging ? "CHG" : "BAT", Serial.isPlugged());
 }
 
 // ---------- SHTC3 温湿度 ----------
