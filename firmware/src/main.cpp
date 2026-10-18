@@ -362,6 +362,41 @@ static void drawEnvPage() {
   LOG("env: t=%.1fC h=%.0f%% rtc=%d chip=%.0fC", temp, hum, rt.valid, ct);
 }
 
+// 环境页时间区域 tile 行范围 (y≈48~96, 覆盖 38px 大号数字)
+#define ENV_TIME_TILE_START 6
+#define ENV_TIME_TILE_END   11
+
+// 仅刷新环境页的时间数字 (局部 tile 更新, 避免全屏闪烁和慢刷新)
+static void updateEnvTimePartial() {
+  u8g2_t *u = u8g2.getU8g2();
+  u8x8_t *u8x8 = u8g2_GetU8x8(u);
+
+  RtcTime rt = readRTC();
+  char timeStr[16];
+  if (rt.valid) {
+    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", rt.hour, rt.minute, rt.second);
+  } else {
+    snprintf(timeStr, sizeof(timeStr), "--:--:--");
+  }
+
+  // 仅清除时间条带 (y=48..96), 保留标题/日期/卡片等其他区域
+  u8g2_SetDrawColor(u, 0);
+  u8g2_DrawBox(u, 0, 48, BMP_W, 48);
+  u8g2_SetDrawColor(u, 1);
+
+  u8g2_SetFont(u, u8g2_font_inb38_mn);
+  int tw = u8g2_GetStrWidth(u, timeStr);
+  u8g2_DrawStr(u, (BMP_W - tw) / 2, 88, timeStr);
+
+  // 只发送时间区域的 tile 行到 ST7305
+  uint8_t w = u8x8->display_info->tile_width;
+  uint8_t *buf = u8g2_GetBufferPtr(u);
+  for (int row = ENV_TIME_TILE_START; row <= ENV_TIME_TILE_END; row++) {
+    uint8_t *ptr = buf + (uint32_t)row * w * 8;
+    u8x8_DrawTile(u8x8, 0, row, w, ptr);
+  }
+}
+
 static void showBitmap() {
   // 逐位画点(Mac 位图: MSB first, 1=黑), 绕开 drawBitmap 在 ST7305 上的问题
   u8g2_t *u = u8g2.getU8g2();
@@ -574,11 +609,19 @@ void loop() {
     refreshPage(curPage);
     return;
   }
-  // 定时刷新当前页 (硬件页/环境页用更短间隔)
+
+  // 环境页: 每秒局部刷新时间数字 (快速, 不闪屏)
+  static uint32_t lastTimeTick = 0;
+  if (curPage == PAGE_ENV && millis() - lastTimeTick >= 1000) {
+    lastTimeTick = millis();
+    updateEnvTimePartial();
+  }
+
+  // 定时全屏刷新当前页 (环境页用 60s 全屏, 时间靠上面的局部刷新)
   static uint32_t last = 0;
   uint32_t interval;
   if (curPage == 2)            interval = HW_REFRESH_MS;
-  else if (curPage == PAGE_ENV) interval = 10UL * 1000UL;  // 环境页 10s 自动刷新
+  else if (curPage == PAGE_ENV) interval = 60UL * 1000UL;  // 环境页 60s 全屏刷新
   else                         interval = REFRESH_MS;
   if (millis() - last >= interval) {
     last = millis();
