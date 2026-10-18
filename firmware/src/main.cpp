@@ -17,6 +17,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <U8g2lib.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -41,6 +42,10 @@
 #define BOOT_BTN  0                    // BOOT 键: 立即刷新当前页
 #define KEY_BTN   18                   // KEY 键: 切换页面(低电平有效, 微雪文档)
 #define BATT_PIN  9                    // 电池电压检测 ADC1_CH8 (分压 3:4, Vbat=Vadc*4/3)
+#define I2C_SDA   13                   // I2C 数据 (SHTC3 / PCF85063)
+#define I2C_SCL   14                   // I2C 时钟
+#define SHTC3_ADDR 0x70                // 温湿度传感器
+#define RTC_ADDR   0x51                // PCF85063 实时时钟
 
 #define CMD_HPM 0x38
 
@@ -50,14 +55,20 @@
 #define ROW_BYTES (BMP_W / 8)          // 50
 
 // ---------- 页面定义 (与 Mac 端 codex_eink.py 页序一致) ----------
-const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW" };
-const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2" };
-#define PAGE_COUNT 3
+// 前 3 页从 Mac 拉取位图, 第 4 页为本地环境页(时间/温湿度/WiFi)
+const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW", "ENV" };
+const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2", "" };
+#define PAGE_COUNT 4
+#define PAGE_ENV  3   // 本地环境页索引
 
 static U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(ROTATION, RLCD_CS, RLCD_DC, RLCD_RST);
 static uint8_t bmpBuf[BMP_BYTES];
 static int curPage = 0;
 static bool wifiOk = false;
+
+// 前向声明
+static bool wifiConnect();
+static bool syncNtpToRtc();
 
 #define LOG(fmt, ...) do { Serial.printf("[ce] " fmt "\n", ##__VA_ARGS__); } while (0)
 
@@ -160,6 +171,196 @@ static void drawBatteryIndicator(u8g2_t *u) {
   LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
 }
 
+// ---------- SHTC3 温湿度 ----------
+// 返回 true 成功, 温度(°C)和湿度(%)写入出参
+static bool readSHTC3(float &tempC, float &humPct) {
+  // 唤醒 SHTC3 (默认休眠)
+  Wire.beginTransmission(SHTC3_ADDR);
+  Wire.write(0x35);
+  Wire.write(0x17);
+  uint8_t wake = Wire.endTransmission();
+  if (wake != 0) {
+    LOG("shtc3: wake fail err=%d", wake);
+    return false;
+  }
+  delay(1);  // 唤醒后等待
+
+  // 高精度测量, clock stretching: 0x7CA2 (用完整 stop, 不用 repeated start)
+  Wire.beginTransmission(SHTC3_ADDR);
+  Wire.write(0x7C);
+  Wire.write(0xA2);
+  uint8_t cmd = Wire.endTransmission();
+  if (cmd != 0) {
+    LOG("shtc3: cmd fail err=%d", cmd);
+    return false;
+  }
+  delay(15);  // 等待测量完成 (高精度模式最长 15ms)
+
+  uint8_t buf[6];
+  uint8_t got = Wire.requestFrom((int)SHTC3_ADDR, 6);
+  if (got != 6) {
+    LOG("shtc3: short read got=%d", got);
+    return false;
+  }
+  for (int i = 0; i < 6; i++) buf[i] = Wire.read();
+
+  uint16_t rawT = (buf[0] << 8) | buf[1];
+  uint16_t rawH = (buf[3] << 8) | buf[4];
+  tempC = -45.0f + 175.0f * (rawT / 65535.0f);
+  humPct = 100.0f * (rawH / 65535.0f);
+  return true;
+}
+
+// ---------- PCF85063 RTC ----------
+struct RtcTime {
+  int year, month, day, weekday, hour, minute, second;
+  bool valid;  // OS 标志位为 0 表示时间有效
+};
+
+static uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+
+static RtcTime readRTC() {
+  RtcTime t = {0, 0, 0, 0, 0, 0, 0, false};
+  Wire.beginTransmission(RTC_ADDR);
+  Wire.write(0x04);  // 秒寄存器起始地址
+  uint8_t err = Wire.endTransmission(false);
+  if (err != 0) {
+    LOG("rtc: addr fail err=%d", err);
+    return t;
+  }
+  uint8_t got = Wire.requestFrom((int)RTC_ADDR, 7);
+  if (got != 7) {
+    LOG("rtc: short read got=%d", got);
+    return t;
+  }
+  uint8_t b[7];
+  for (int i = 0; i < 7; i++) b[i] = Wire.read();
+  t.second  = bcd2dec(b[0] & 0x7F);
+  t.minute  = bcd2dec(b[1] & 0x7F);
+  t.hour    = bcd2dec(b[2] & 0x3F);
+  t.day     = bcd2dec(b[3] & 0x3F);
+  t.weekday = b[4] & 0x07;
+  t.month   = bcd2dec(b[5] & 0x1F);
+  t.year    = 2000 + bcd2dec(b[6]);
+  t.valid   = !(b[0] & 0x80);  // OS=0 有效
+  return t;
+}
+
+// ---------- 本地环境页面渲染 ----------
+static void drawEnvPage() {
+  // 确保 WiFi 连接以同步 NTP 时间 (非阻塞, 失败也不影响显示)
+  wifiConnect();
+
+  u8g2_t *u = u8g2.getU8g2();
+  u8g2.clearBuffer();
+  u8g2_SetDrawColor(u, 1);
+
+  // 读取传感器数据
+  float temp = 0, hum = 0;
+  bool shtOk = readSHTC3(temp, hum);
+  RtcTime rt = readRTC();
+
+  // ---- 标题栏 ----
+  u8g2_SetFont(u, u8g2_font_9x15B_tf);
+  u8g2_DrawStr(u, 12, 24, "ENVIRONMENT");
+  u8g2_DrawLine(u, 12, 30, 388, 30);
+
+  // ---- 大号时间 ----
+  char timeStr[16];
+  if (rt.valid) {
+    snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", rt.hour, rt.minute, rt.second);
+  } else {
+    snprintf(timeStr, sizeof(timeStr), "--:--:--");
+  }
+  u8g2_SetFont(u, u8g2_font_inb38_mn);  // 大号数字字体
+  int tw = u8g2_GetStrWidth(u, timeStr);
+  u8g2_DrawStr(u, (BMP_W - tw) / 2, 88, timeStr);
+
+  // ---- 日期 + 星期 ----
+  const char *wknames[] = { "日", "一", "二", "三", "四", "五", "六" };
+  char dateStr[32];
+  if (rt.valid) {
+    snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d  星期%s",
+             rt.year, rt.month, rt.day, wknames[rt.weekday % 7]);
+  } else {
+    snprintf(dateStr, sizeof(dateStr), "RTC 未同步 (OS=1)");
+  }
+  u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+  int dw = u8g2_GetUTF8Width(u, dateStr);
+  u8g2_DrawUTF8(u, (BMP_W - dw) / 2, 112, dateStr);
+
+  // ---- 温湿度卡片 ----
+  int cardY = 138;
+  int cardH = 90;
+  int cardW = 170;
+  int gapX = 16;
+
+  // 温度卡片
+  int tx = 20;
+  u8g2_DrawFrame(u, tx, cardY, cardW, cardH);
+  u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+  u8g2_DrawUTF8(u, tx + 10, cardY + 20, "温度");
+  char tStr[24];
+  if (shtOk) snprintf(tStr, sizeof(tStr), "%.1f°C", temp);
+  else       snprintf(tStr, sizeof(tStr), "--.-°C");
+  u8g2_SetFont(u, u8g2_font_inb24_mn);
+  u8g2_DrawStr(u, tx + 10, cardY + 62, tStr);
+
+  // 湿度卡片
+  int hx = tx + cardW + gapX;
+  u8g2_DrawFrame(u, hx, cardY, cardW, cardH);
+  u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+  u8g2_DrawUTF8(u, hx + 10, cardY + 20, "湿度");
+  char hStr[24];
+  if (shtOk) snprintf(hStr, sizeof(hStr), "%.0f%%", hum);
+  else       snprintf(hStr, sizeof(hStr), "--%%");
+  u8g2_SetFont(u, u8g2_font_inb24_mn);
+  u8g2_DrawStr(u, hx + 10, cardY + 62, hStr);
+
+  // ---- 底部信息栏 ----
+  int by = 252;
+  u8g2_SetFont(u, u8g2_font_7x13_tf);
+
+  // WiFi 信号
+  char wifiStr[40];
+  if (WiFi.status() == WL_CONNECTED) {
+    snprintf(wifiStr, sizeof(wifiStr), "WiFi:%s  %ddBm",
+             WiFi.SSID().c_str(), WiFi.RSSI());
+  } else {
+    snprintf(wifiStr, sizeof(wifiStr), "WiFi: 未连接");
+  }
+  u8g2_DrawStr(u, 12, by, wifiStr);
+
+  // IP 地址
+  char ipStr[40];
+  snprintf(ipStr, sizeof(ipStr), "IP:%s",
+           WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "---");
+  u8g2_DrawStr(u, 12, by + 16, ipStr);
+
+  // 运行时长 (右侧)
+  uint32_t up = millis() / 1000;
+  int dd = up / 86400, hh = (up % 86400) / 3600, mm = (up % 3600) / 60;
+  char upStr[32];
+  snprintf(upStr, sizeof(upStr), "up %dd %02d:%02d", dd, hh, mm);
+  int uw = u8g2_GetStrWidth(u, upStr);
+  u8g2_DrawStr(u, BMP_W - uw - 12, by, upStr);
+
+  // 芯片温度 (右下)
+  float ct = temperatureRead();
+  char ctStr[24];
+  snprintf(ctStr, sizeof(ctStr), "芯片 %.0f°C", ct);
+  int cw = u8g2_GetStrWidth(u, ctStr);
+  u8g2_DrawStr(u, BMP_W - cw - 12, by + 16, ctStr);
+
+  // 叠加电池电量 (顶部居中, 覆盖在标题下方)
+  drawBatteryIndicator(u);
+
+  applyInvert();
+  u8g2.sendBuffer();
+
+  LOG("env: t=%.1fC h=%.0f%% rtc=%d chip=%.0fC", temp, hum, rt.valid, ct);
+}
+
 static void showBitmap() {
   // 逐位画点(Mac 位图: MSB first, 1=黑), 绕开 drawBitmap 在 ST7305 上的问题
   u8g2_t *u = u8g2.getU8g2();
@@ -215,6 +416,41 @@ static bool wifiConnect() {
   }
   wifiOk = true;
   LOG("wifi: connected, ip=%s rssi=%d", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
+  // 首次连接成功后, 用 NTP 校准 RTC
+  static bool ntpSynced = false;
+  if (!ntpSynced) {
+    ntpSynced = syncNtpToRtc();
+  }
+  return true;
+}
+
+// NTP 同步时间并写入 RTC (WiFi 已连接时调用)
+static bool syncNtpToRtc() {
+  configTime(8 * 3600, 0, "ntp.aliyun.com", "pool.ntp.org");  // CST(UTC+8)
+  struct tm tinfo;
+  uint32_t t0 = millis();
+  while (!getLocalTime(&tinfo, 0)) {
+    if (millis() - t0 > 5000) {
+      LOG("ntp: timeout");
+      return false;
+    }
+    delay(100);
+  }
+  // 写入 PCF85063 (BCD 编码)
+  Wire.beginTransmission(RTC_ADDR);
+  Wire.write(0x04);  // 秒寄存器
+  Wire.write(((tinfo.tm_sec / 10) << 4) | (tinfo.tm_sec % 10));
+  Wire.write(((tinfo.tm_min / 10) << 4) | (tinfo.tm_min % 10));
+  Wire.write(((tinfo.tm_hour / 10) << 4) | (tinfo.tm_hour % 10));
+  Wire.write(((tinfo.tm_mday / 10) << 4) | (tinfo.tm_mday % 10));
+  Wire.write(tinfo.tm_wday & 0x07);
+  Wire.write((((tinfo.tm_mon + 1) / 10) << 4) | ((tinfo.tm_mon + 1) % 10));
+  Wire.write((((tinfo.tm_year % 100) / 10) << 4) | ((tinfo.tm_year % 100) % 10));
+  Wire.endTransmission();
+  LOG("ntp: synced %04d-%02d-%02d %02d:%02d:%02d -> RTC",
+      tinfo.tm_year + 1900, tinfo.tm_mon + 1, tinfo.tm_mday,
+      tinfo.tm_hour, tinfo.tm_min, tinfo.tm_sec);
   return true;
 }
 
@@ -267,6 +503,12 @@ static bool fetchBitmap(int page, char *err, size_t errLen) {
 }
 
 static void refreshPage(int page) {
+  // 本地环境页: 直接渲染, 不拉取位图
+  if (page == PAGE_ENV) {
+    drawEnvPage();
+    return;
+  }
+
   splash("loading page...");
   char err[96] = "";
   bool ok = fetchBitmap(page, err, sizeof(err));
@@ -301,6 +543,10 @@ void setup() {
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(KEY_BTN, INPUT_PULLUP);
 
+  Wire.begin(I2C_SDA, I2C_SCL);   // SHTC3 + PCF85063
+  Wire.setClock(100000);
+  Wire.setTimeOut(50);
+
   SPI.begin(RLCD_SCK, -1, RLCD_MOSI, RLCD_CS);
   u8g2.initDisplay();
   u8g2.clearDisplay();
@@ -327,9 +573,12 @@ void loop() {
     refreshPage(curPage);
     return;
   }
-  // 定时刷新当前页 (硬件页用更短间隔)
+  // 定时刷新当前页 (硬件页/环境页用更短间隔)
   static uint32_t last = 0;
-  uint32_t interval = (curPage == 2) ? HW_REFRESH_MS : REFRESH_MS;
+  uint32_t interval;
+  if (curPage == 2)       interval = HW_REFRESH_MS;
+  else if (curPage == PAGE_ENV) interval = 30UL * 1000UL;  // 环境页 30s
+  else                    interval = REFRESH_MS;
   if (millis() - last >= interval) {
     last = millis();
     refreshPage(curPage);
