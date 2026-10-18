@@ -2,7 +2,7 @@
  * codex-eink ESP32 固件 · 微雪 ESP32-S3-RLCD-4.2 (ST7305, 300x400 全反射屏)
  *
  * 常驻模式(USB 供电): 启动 -> 连 WiFi (保持常连) -> 拉取当前页位图并绘制
- *   - KEY (GPIO18): 切换到下一页 (Codex / TRAE / HW / HOME_TEST) 并立即拉取
+ *   - KEY (GPIO18): 切换到下一页 (Codex / TRAE / HW) 并立即拉取
  *   - BOOT (GPIO0): 立即刷新当前页
  *   - 普通页每 5 分钟自动刷新, 硬件页每 15 秒刷新
  *
@@ -40,6 +40,7 @@
 #define RLCD_RST  41
 #define BOOT_BTN  0                    // BOOT 键: 立即刷新当前页
 #define KEY_BTN   18                   // KEY 键: 切换页面(低电平有效, 微雪文档)
+#define BATT_PIN  9                    // 电池电压检测 ADC1_CH8 (分压 3:4, Vbat=Vadc*4/3)
 
 #define CMD_HPM 0x38
 
@@ -49,9 +50,9 @@
 #define ROW_BYTES (BMP_W / 8)          // 50
 
 // ---------- 页面定义 (与 Mac 端 codex_eink.py 页序一致) ----------
-const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW", "HOME_TEST" };
-const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2", "/bitmap?page=3" };
-#define PAGE_COUNT 4
+const char *PAGE_NAMES[] = { "CODEX", "TRAE", "HW" };
+const char *PAGE_PATHS[] = { "/bitmap?page=0", "/bitmap?page=1", "/bitmap?page=2" };
+#define PAGE_COUNT 3
 
 static U8G2_ST7305_300X400_F_4W_HW_SPI u8g2(ROTATION, RLCD_CS, RLCD_DC, RLCD_RST);
 static uint8_t bmpBuf[BMP_BYTES];
@@ -69,6 +70,103 @@ static void applyInvert() {
 #endif
 }
 
+// 读取电池电压 (V), 分压比 3:4 (Vadc = Vbat * 3/4, 故 Vbat = Vadc * 4/3)
+static float readBatteryVoltage() {
+  analogReadResolution(12);
+  analogSetPinAttenuation(BATT_PIN, ADC_11db);
+  // 多次采样取平均, 抑制噪声
+  uint32_t sum = 0;
+  const int N = 8;
+  for (int i = 0; i < N; i++) {
+    sum += analogReadMilliVolts(BATT_PIN);
+    delay(2);
+  }
+  float mv = (float)sum / N;
+  return mv * 4.0f / 3.0f / 1000.0f;  // 分压 3:4 -> 实际电压
+}
+
+// LiPo 电量百分比 (基于放电曲线分段线性)
+static int batteryPercent(float v) {
+  if (v >= 4.20f) return 100;
+  if (v >= 4.10f) return 90 + (int)((v - 4.10f) / 0.10f * 10);
+  if (v >= 3.90f) return 75 + (int)((v - 3.90f) / 0.20f * 15);
+  if (v >= 3.70f) return 50 + (int)((v - 3.70f) / 0.20f * 25);
+  if (v >= 3.50f) return 25 + (int)((v - 3.50f) / 0.20f * 25);
+  if (v >= 3.30f) return 10 + (int)((v - 3.30f) / 0.20f * 15);
+  if (v >= 3.00f) return (int)((v - 3.00f) / 0.30f * 10);
+  return 0;
+}
+
+// 在指定位置画闪电图标 (充电标识), 10x14
+static void drawBolt(u8g2_t *u, int x, int y) {
+  // 用水平线段拼出闪电形状 (9宽 x 12高, 居中于 10x14)
+  u8g2_SetDrawColor(u, 1);
+  // 每行 [起始x偏移, 宽度]
+  static const int bolt[12][2] = {
+    {4, 2}, {3, 2}, {3, 3}, {2, 3},
+    {2, 4}, {1, 4}, {1, 3}, {2, 2},
+    {2, 2}, {3, 2}, {3, 1}, {4, 1}
+  };
+  for (int row = 0; row < 12; row++) {
+    u8g2_DrawBox(u, x + bolt[row][0], y + 1 + row, bolt[row][1], 1);
+  }
+}
+
+// 在 u8g2 缓冲区顶部中间绘制电池图标 + 百分比 + 充电状态
+// (在 showBitmap 复制完位图后、sendBuffer 前调用, 叠加在位图之上)
+static void drawBatteryIndicator(u8g2_t *u) {
+  float v = readBatteryVoltage();
+  int pct = batteryPercent(v);
+  // 充电判定: 电压 >= 4.16V 时充电芯片在恒压充电 (插 USB 时维持高位)
+  bool charging = (v >= 4.16f);
+
+  // 电池图标尺寸
+  const int BW = 34;   // 电池主体宽
+  const int BH = 14;   // 电池主体高
+  const int NW = 3;    // 极耳宽
+  const int NH = 6;    // 极耳高
+
+  // 计算总宽度: [闪电?] + 电池 + 文本
+  char pctStr[8];
+  snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+  u8g2_SetFont(u, u8g2_font_7x13_tf);
+  int tw = u8g2_GetStrWidth(u, pctStr);
+  int gap = 5;
+  int boltW = charging ? 10 + 4 : 0;  // 闪电宽 + 间距
+  int totalW = boltW + BW + NW + gap + tw;
+  int x0 = (BMP_W - totalW) / 2;   // 水平居中
+  int y0 = 7;                       // 顶部垂直位置
+
+  // 先清空该区域 (用白色覆盖位图), 避免与页面内容重叠
+  u8g2_SetDrawColor(u, 0);
+  u8g2_DrawBox(u, x0 - 2, y0 - 2, totalW + 4, BH + 4);
+  u8g2_SetDrawColor(u, 1);
+
+  int bx = x0;  // 电池绘制起点
+  if (charging) {
+    drawBolt(u, x0, y0);
+    bx = x0 + 10 + 4;  // 闪电宽10 + 间距4
+  }
+
+  // 电池极耳 (右侧小凸起)
+  u8g2_DrawBox(u, bx + BW, y0 + (BH - NH) / 2, NW, NH);
+  // 电池主体边框
+  u8g2_DrawFrame(u, bx, y0, BW, BH);
+
+  // 电池内部填充 (留 2px 边距)
+  int innerW = BW - 4;
+  int innerH = BH - 4;
+  int fillW = (innerW * pct) / 100;
+  if (fillW > 0) {
+    u8g2_DrawBox(u, bx + 2, y0 + 2, fillW, innerH);
+  }
+
+  // 百分比文本
+  u8g2_DrawStr(u, bx + BW + NW + gap, y0 + BH - 1, pctStr);
+
+  LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
+}
+
 static void showBitmap() {
   // 逐位画点(Mac 位图: MSB first, 1=黑), 绕开 drawBitmap 在 ST7305 上的问题
   u8g2_t *u = u8g2.getU8g2();
@@ -84,6 +182,8 @@ static void showBitmap() {
         if (v & (0x80 >> b)) u8g2_DrawPixel(u, x0 + b, row);
     }
   }
+  // 叠加电池电量指示 (顶部居中)
+  drawBatteryIndicator(u);
   applyInvert();
   u8g2.sendBuffer();
 }
@@ -96,6 +196,7 @@ static void splash(const char *line) {
   u8g2.drawLine(20, 70, 380, 70);
   u8g2.setFont(u8g2_font_9x15_tf);
   u8g2.drawStr(20, 110, line);
+  drawBatteryIndicator(u8g2.getU8g2());
   applyInvert();
   u8g2.sendBuffer();
 }
@@ -192,6 +293,7 @@ static void refreshPage(int page) {
     u8g2.drawStr(20, 130, err);
     u8g2.setFont(u8g2_font_7x13_tf);
     u8g2.drawStr(20, 260, "KEY: next page   BOOT: retry");
+    drawBatteryIndicator(u8g2.getU8g2());
     applyInvert();
     u8g2.sendBuffer();
     LOG("error screen: %s", err);
