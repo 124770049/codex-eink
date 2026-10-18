@@ -97,23 +97,6 @@ static int batteryPercent(float v) {
   return 0;
 }
 
-// 在指定位置画闪电图标 (充电标识), 8x12, 2px 粗线条
-static void drawBolt(u8g2_t *u, int x, int y) {
-  u8g2_SetDrawColor(u, 1);
-  // 每行 [起始x偏移, 宽度], 从上到下: 右 -> 左折 -> 右 (标准闪电)
-  static const int bolt[12][2] = {
-    {5, 2}, {5, 2},   // 顶部
-    {4, 2}, {4, 2},
-    {3, 3}, {3, 3},   // 向左展开
-    {1, 4}, {1, 4},   // 折角, 跳到左侧
-    {2, 3}, {2, 3},   // 向右收回
-    {3, 2}, {3, 2}    // 底部
-  };
-  for (int row = 0; row < 12; row++) {
-    u8g2_DrawBox(u, x + bolt[row][0], y + 1 + row, bolt[row][1], 1);
-  }
-}
-
 // 在 u8g2 缓冲区顶部中间绘制电池图标 + 百分比 + 充电状态
 // (在 showBitmap 复制完位图后、sendBuffer 前调用, 叠加在位图之上)
 static void drawBatteryIndicator(u8g2_t *u) {
@@ -128,14 +111,20 @@ static void drawBatteryIndicator(u8g2_t *u) {
   const int NW = 3;    // 极耳宽
   const int NH = 6;    // 极耳高
 
-  // 布局: [电池] [百分比] [闪电?]
+  // 布局: [电池] [百分比] [充电中?]
   char pctStr[8];
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+  const char *chgStr = charging ? "充电中" : "";
+  // 百分比用 7x13 字体, 中文用文泉驿 12px 字体
   u8g2_SetFont(u, u8g2_font_7x13_tf);
   int tw = u8g2_GetStrWidth(u, pctStr);
+  int cw = 0;
+  if (charging) {
+    u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+    cw = u8g2_GetStrWidth(u, chgStr);
+  }
   int gap = 5;
-  int boltW = charging ? 8 + 4 : 0;  // 闪电宽8 + 间距4
-  int totalW = BW + NW + gap + tw + boltW;
+  int totalW = BW + NW + gap + tw + (charging ? gap + cw : 0);
   int x0 = (BMP_W - totalW) / 2;   // 水平居中
   int y0 = 7;                       // 顶部垂直位置
 
@@ -158,12 +147,14 @@ static void drawBatteryIndicator(u8g2_t *u) {
   }
 
   // 百分比文本
+  u8g2_SetFont(u, u8g2_font_7x13_tf);
   int tx = x0 + BW + NW + gap;
   u8g2_DrawStr(u, tx, y0 + BH - 1, pctStr);
 
-  // 闪电图标 (充电时显示在百分比右侧)
+  // 充电中文字 (充电时显示在百分比右侧, 用中文字体)
   if (charging) {
-    drawBolt(u, tx + tw + 4, y0);
+    u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
+    u8g2_DrawStr(u, tx + tw + gap, y0 + BH - 1, chgStr);
   }
 
   LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
