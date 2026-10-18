@@ -121,7 +121,7 @@ static void drawBatteryIndicator(u8g2_t *u) {
   int cw = 0;
   if (charging) {
     u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
-    cw = u8g2_GetStrWidth(u, chgStr);
+    cw = u8g2_GetUTF8Width(u, chgStr);
   }
   int gap = 5;
   int totalW = BW + NW + gap + tw + (charging ? gap + cw : 0);
@@ -151,10 +151,10 @@ static void drawBatteryIndicator(u8g2_t *u) {
   int tx = x0 + BW + NW + gap;
   u8g2_DrawStr(u, tx, y0 + BH - 1, pctStr);
 
-  // 充电中文字 (充电时显示在百分比右侧, 用中文字体)
+  // 充电中文字 (充电时显示在百分比右侧, 用中文字体, 必须用 UTF8 版本)
   if (charging) {
     u8g2_SetFont(u, u8g2_font_wqy12_t_gb2312);
-    u8g2_DrawStr(u, tx + tw + gap, y0 + BH - 1, chgStr);
+    u8g2_DrawUTF8(u, tx + tw + gap, y0 + BH - 1, chgStr);
   }
 
   LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
