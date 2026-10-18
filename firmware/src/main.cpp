@@ -97,15 +97,17 @@ static int batteryPercent(float v) {
   return 0;
 }
 
-// 在指定位置画闪电图标 (充电标识), 10x14
+// 在指定位置画闪电图标 (充电标识), 8x12, 2px 粗线条
 static void drawBolt(u8g2_t *u, int x, int y) {
-  // 用水平线段拼出闪电形状 (9宽 x 12高, 居中于 10x14)
   u8g2_SetDrawColor(u, 1);
-  // 每行 [起始x偏移, 宽度]
+  // 每行 [起始x偏移, 宽度], 从上到下: 右 -> 左折 -> 右 (标准闪电)
   static const int bolt[12][2] = {
-    {4, 2}, {3, 2}, {3, 3}, {2, 3},
-    {2, 4}, {1, 4}, {1, 3}, {2, 2},
-    {2, 2}, {3, 2}, {3, 1}, {4, 1}
+    {5, 2}, {5, 2},   // 顶部
+    {4, 2}, {4, 2},
+    {3, 3}, {3, 3},   // 向左展开
+    {1, 4}, {1, 4},   // 折角, 跳到左侧
+    {2, 3}, {2, 3},   // 向右收回
+    {3, 2}, {3, 2}    // 底部
   };
   for (int row = 0; row < 12; row++) {
     u8g2_DrawBox(u, x + bolt[row][0], y + 1 + row, bolt[row][1], 1);
@@ -126,14 +128,14 @@ static void drawBatteryIndicator(u8g2_t *u) {
   const int NW = 3;    // 极耳宽
   const int NH = 6;    // 极耳高
 
-  // 计算总宽度: [闪电?] + 电池 + 文本
+  // 布局: [电池] [百分比] [闪电?]
   char pctStr[8];
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
   u8g2_SetFont(u, u8g2_font_7x13_tf);
   int tw = u8g2_GetStrWidth(u, pctStr);
   int gap = 5;
-  int boltW = charging ? 10 + 4 : 0;  // 闪电宽 + 间距
-  int totalW = boltW + BW + NW + gap + tw;
+  int boltW = charging ? 8 + 4 : 0;  // 闪电宽8 + 间距4
+  int totalW = BW + NW + gap + tw + boltW;
   int x0 = (BMP_W - totalW) / 2;   // 水平居中
   int y0 = 7;                       // 顶部垂直位置
 
@@ -142,27 +144,27 @@ static void drawBatteryIndicator(u8g2_t *u) {
   u8g2_DrawBox(u, x0 - 2, y0 - 2, totalW + 4, BH + 4);
   u8g2_SetDrawColor(u, 1);
 
-  int bx = x0;  // 电池绘制起点
-  if (charging) {
-    drawBolt(u, x0, y0);
-    bx = x0 + 10 + 4;  // 闪电宽10 + 间距4
-  }
-
   // 电池极耳 (右侧小凸起)
-  u8g2_DrawBox(u, bx + BW, y0 + (BH - NH) / 2, NW, NH);
+  u8g2_DrawBox(u, x0 + BW, y0 + (BH - NH) / 2, NW, NH);
   // 电池主体边框
-  u8g2_DrawFrame(u, bx, y0, BW, BH);
+  u8g2_DrawFrame(u, x0, y0, BW, BH);
 
   // 电池内部填充 (留 2px 边距)
   int innerW = BW - 4;
   int innerH = BH - 4;
   int fillW = (innerW * pct) / 100;
   if (fillW > 0) {
-    u8g2_DrawBox(u, bx + 2, y0 + 2, fillW, innerH);
+    u8g2_DrawBox(u, x0 + 2, y0 + 2, fillW, innerH);
   }
 
   // 百分比文本
-  u8g2_DrawStr(u, bx + BW + NW + gap, y0 + BH - 1, pctStr);
+  int tx = x0 + BW + NW + gap;
+  u8g2_DrawStr(u, tx, y0 + BH - 1, pctStr);
+
+  // 闪电图标 (充电时显示在百分比右侧)
+  if (charging) {
+    drawBolt(u, tx + tw + 4, y0);
+  }
 
   LOG("battery: %.2fV %d%% %s", v, pct, charging ? "CHG" : "BAT");
 }
