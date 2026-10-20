@@ -21,13 +21,18 @@
 #include <U8g2lib.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 
 #include "secrets.h"
 
 // ---------- 配置 ----------
-#define MAC_HOST       "192.168.5.12"   // Mac 局域网 IP (ipconfig getifaddr en0)
 #define MAC_PORT       8090
+#define MAC_MDNS_NAME  "Jues-MacBook-Pro"  // Mac 的 Bonjour 主机名 (scutil --get LocalHostName)
+// 已知 Mac 局域网 IP 备选 (家/公司), mDNS 失败时逐个探测兜底
+static const char *MAC_HOST_FALLBACKS[] = { "192.168.5.12", "192.168.0.57" };
+#define MAC_FALLBACK_COUNT (sizeof(MAC_HOST_FALLBACKS) / sizeof(MAC_HOST_FALLBACKS[0]))
+static String macHost = "";   // 运行时发现到的实际 Mac 地址
 #define REFRESH_MS     (5UL * 60UL * 1000UL)  // 自动刷新间隔(与 Mac 端 5 分钟抓取同步)
 #define HW_REFRESH_MS  (15UL * 1000UL)         // 硬件页刷新间隔(墨水屏建议 ≥10s)
 #define AUTO_SWITCH_MS (30UL * 1000UL)         // 自动轮播切换间隔(保护按键寿命)
@@ -536,28 +541,62 @@ static bool syncNtpToRtc() {
   return true;
 }
 
-// 拉取当前页位图; WiFi 保持常连
-static bool fetchBitmap(int page, char *err, size_t errLen) {
-  if (!wifiConnect()) {
-    snprintf(err, errLen, "wifi connect fail");
-    return false;
+// 探测某 IP 的 8090 端口是否可连 (快速 TCP 连接测试)
+static bool probeHost(const char *ip) {
+  WiFiClient c;
+  c.setTimeout(700);
+  bool ok = c.connect(ip, MAC_PORT, 700);
+  c.stop();
+  return ok;
+}
+
+// 发现 Mac: 先 mDNS 解析 Bonjour 主机名, 再逐个探测已知 IP
+// 解决家/公司两地切换、DHCP 变更导致的 Mac IP 变化问题
+static void discoverMac() {
+  splash("finding mac...");
+
+  // 1) mDNS: Mac 自带 Bonjour 服务, 解析主机名即可拿到当前 IP
+  static bool mdnsStarted = false;
+  if (!mdnsStarted) mdnsStarted = MDNS.begin("codex-eink");
+  if (mdnsStarted) {
+    IPAddress ip = MDNS.queryHost(MAC_MDNS_NAME ".local", 3000);
+    if ((uint32_t)ip == 0) ip = MDNS.queryHost(MAC_MDNS_NAME, 3000);
+    if ((uint32_t)ip != 0) {
+      macHost = ip.toString();
+      LOG("discover: mDNS -> %s", macHost.c_str());
+      return;
+    }
+    LOG("discover: mDNS not found");
   }
 
+  // 2) 兜底: 逐个探测已知 IP
+  for (size_t i = 0; i < MAC_FALLBACK_COUNT; i++) {
+    if (probeHost(MAC_HOST_FALLBACKS[i])) {
+      macHost = MAC_HOST_FALLBACKS[i];
+      LOG("discover: probe -> %s", macHost.c_str());
+      return;
+    }
+  }
+  LOG("discover: no Mac found (mDNS + %d IPs failed)", (int)MAC_FALLBACK_COUNT);
+}
+
+// 实际执行一次 HTTP 拉取 (使用已解析的 macHost)
+static bool httpGetBitmap(int page, char *err, size_t errLen) {
   splash("fetching...");
   HTTPClient http;
   http.setConnectTimeout(4000);
   http.setTimeout(10000);
   bool ok = false;
 
-  LOG("http: GET %s:%d%s", MAC_HOST, MAC_PORT, PAGE_PATHS[page]);
-  if (!http.begin(String("http://") + MAC_HOST + ":" + MAC_PORT + PAGE_PATHS[page])) {
+  LOG("http: GET %s:%d%s", macHost.c_str(), MAC_PORT, PAGE_PATHS[page]);
+  if (!http.begin(String("http://") + macHost + ":" + MAC_PORT + PAGE_PATHS[page])) {
     snprintf(err, errLen, "HTTP begin fail");
     LOG("http: begin fail");
   } else {
     int code = http.GET();
     LOG("http: status %d", code);
     if (code != 200) {
-      snprintf(err, errLen, "HTTP %d from %s", code, MAC_HOST);
+      snprintf(err, errLen, "HTTP %d from %s", code, macHost.c_str());
     } else {
       int len = http.getSize();
       LOG("http: len %d", len);
@@ -582,6 +621,23 @@ static bool fetchBitmap(int page, char *err, size_t errLen) {
     http.end();
   }
   return ok;
+}
+
+// 拉取当前页位图; WiFi 保持常连
+static bool fetchBitmap(int page, char *err, size_t errLen) {
+  if (!wifiConnect()) {
+    snprintf(err, errLen, "wifi connect fail");
+    return false;
+  }
+
+  if (macHost.length() == 0) discoverMac();
+  if (httpGetBitmap(page, err, errLen)) return true;
+
+  // 失败: Mac IP 可能已变化, 重新发现并重试一次
+  LOG("http: retry after re-discovering Mac");
+  macHost = "";
+  discoverMac();
+  return httpGetBitmap(page, err, errLen);
 }
 
 static void refreshPage(int page) {
