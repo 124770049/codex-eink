@@ -87,6 +87,10 @@ static void applyInvert() {
 }
 
 // 读取电池电压 (V), 分压比 1:3 (Vadc = Vbat / 3, 故 Vbat = Vadc * 3) 微雪官方
+// 单板校准系数: 满充实测读数 4.11V, 充电截止电压 4.20V -> 4.20/4.11 ≈ 1.022
+// (2026-10-19 满充一晚后通过 NVS maxV 实测校准)
+#define BATT_CAL 1.022f
+
 static float readBatteryVoltage() {
   analogReadResolution(12);
   analogSetPinAttenuation(BATT_PIN, ADC_11db);
@@ -97,7 +101,7 @@ static float readBatteryVoltage() {
     delay(2);
   }
   float mv = (float)sum / N;
-  return mv * 3.0f / 1000.0f;  // 分压 1:3 -> 实际电压
+  return mv * 3.0f * BATT_CAL / 1000.0f;  // 分压 1:3 + 单板校准
 }
 
 // 峰值电压记录 (存 flash, 用于满充校准: 充满后读取 maxV 即可推算校准系数)
