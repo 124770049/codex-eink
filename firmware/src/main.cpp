@@ -492,6 +492,16 @@ static bool wifiConnect() {
 
   LOG("wifi: all networks failed");
   WiFi.disconnect(true, true);
+
+  // 诊断: 扫描周围可见的 2.4GHz 网络, 确认目标热点是否可见
+  LOG("wifi: scanning nearby networks...");
+  int n = WiFi.scanNetworks();
+  for (int j = 0; j < n && j < 20; j++) {
+    LOG("wifi:   found \"%s\" rssi=%d ch=%d enc=%d",
+        WiFi.SSID(j).c_str(), WiFi.RSSI(j), WiFi.channel(j), WiFi.encryptionType(j));
+  }
+  WiFi.scanDelete();
+
   WiFi.mode(WIFI_OFF);
   wifiOk = false;
   return false;
